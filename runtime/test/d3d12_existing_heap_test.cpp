@@ -4,13 +4,15 @@
 // on the host devices too. With VK_EXT_external_memory_host, OpenExistingHeapFromAddress on real host memory is
 // compared case by case with the host devices (open_cases: RTX 4090 and WARP agree), and a heap is opened on a
 // committed range; without it, the device reports EXISTING_HEAPS unsupported and answers an accepted range E_NOTIMPL.
-// No shaders or game data.
+// RT-29 also checks the public contract for an empty lifetime tracker on native D3D12 and records the
+// Vulkan-backed device's unsupported result. No shaders or game data.
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device3-openexistingheapfromaddress
 #include "vk_test_device.h"
 #include "host_adapter.h"
 #include "host_wine.h"
 #include "../shims/d3d12_com.h"
 #include <dxgi1_4.h>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -35,7 +37,48 @@ struct Ref {
     T* operator->() const { return p; }
 };
 
-int check(ID3D12Device* device, const char* who) {
+struct LifetimeOwner final : ID3D12LifetimeOwner {
+    std::atomic<ULONG> refs{1};
+    std::atomic<unsigned> callbacks{0};
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (iid != __uuidof(IUnknown) && iid != __uuidof(ID3D12LifetimeOwner)) return E_NOINTERFACE;
+        *out = static_cast<ID3D12LifetimeOwner*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+    void STDMETHODCALLTYPE LifetimeStateUpdated(D3D12_LIFETIME_STATE) override { ++callbacks; }
+};
+
+int check_empty_tracker(ID3D12Device5* device, const char* who, bool native) {
+    LifetimeOwner owner;
+    {
+        Ref<ID3D12LifetimeTracker> tracker;
+        EXPECT_HR(device->CreateLifetimeTracker(nullptr, IID_PPV_ARGS(&tracker.p)), E_INVALIDARG);
+        EXPECT(tracker.p == nullptr);
+        EXPECT_HR(device->CreateLifetimeTracker(&owner, IID_PPV_ARGS(&tracker.p)), native ? S_OK : E_NOTIMPL);
+        if (native) {
+            EXPECT(tracker.p != nullptr);
+            Ref<IUnknown> tracker_device, expected_device;
+            EXPECT_HR(tracker->GetDevice(IID_PPV_ARGS(&tracker_device.p)), S_OK);
+            EXPECT_HR(device->QueryInterface(IID_PPV_ARGS(&expected_device.p)), S_OK);
+            EXPECT(tracker_device.p && tracker_device.p == expected_device.p);
+        } else {
+            EXPECT(tracker.p == nullptr);
+        }
+    }
+    EXPECT(owner.refs == 1);
+    EXPECT(owner.callbacks == 0);
+    std::printf("%s: empty lifetime tracker %s\n", who,
+                native ? "created, device identity and owner lifetime verified" : "unsupported (E_NOTIMPL)");
+    return 0;
+}
+
+int check(ID3D12Device* device, const char* who, bool native) {
     Ref<ID3D12Device3> device3;
     EXPECT(SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device3.p))));
     Ref<ID3D12Heap> heap;
@@ -47,11 +90,11 @@ int check(ID3D12Device* device, const char* who) {
     EXPECT(heap.p == nullptr);
     Ref<ID3D12Device5> device5;
     if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device5.p)))) {
-        Ref<ID3D12LifetimeTracker> tracker;
-        EXPECT_HR(device5->CreateLifetimeTracker(nullptr, IID_PPV_ARGS(&tracker.p)), E_INVALIDARG);
-        EXPECT(tracker.p == nullptr);
+        if (const int result = check_empty_tracker(device5.p, who, native)) return result;
+    } else {
+        std::printf("%s: ID3D12Device5 unavailable, skipping lifetime tracker\n", who);
     }
-    std::printf("%s: existing-heap and lifetime-tracker refusals match the host runtime\n", who);
+    std::printf("%s: existing-heap refusals match the host runtime\n", who);
     return 0;
 }
 
@@ -344,7 +387,7 @@ int main() {
         info.queue_family = vk.family;
         info.host_pointer_alignment = vk.host_pointer_alignment;
         if (FAILED(rt::d3d12::create_vulkan_device(info, IID_PPV_ARGS(&ours.p)))) return 1;
-        failures += check(ours.p, "vulkan");
+        failures += check(ours.p, "vulkan", false);
         const std::vector<Case> vulkan_cases = open_cases(ours.p);
         print_cases(vulkan_cases, "vulkan");
         failures += check_import(ours.p, vk.host_pointer_alignment != 0);
@@ -357,8 +400,8 @@ int main() {
                 std::string adapter_name;
                 if (!hostadapter::reference(factory.p, vk, warp, &adapter.p, adapter_name)) continue;
                 if (FAILED(D3D12CreateDevice(adapter.p, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&host.p)))) continue;
-                failures += check(host.p, ("host " + adapter_name).c_str());
                 const std::string who = "host " + adapter_name;
+                failures += check(host.p, who.c_str(), true);
                 const std::vector<Case> host_cases = open_cases(host.p);
                 print_cases(host_cases, who.c_str());
                 if (vk.host_pointer_alignment) failures += compare_cases(vulkan_cases, host_cases, who.c_str());
