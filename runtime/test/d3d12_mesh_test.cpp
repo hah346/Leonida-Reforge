@@ -112,11 +112,11 @@ int main() {
     const auto vs_container = shader_container(vs_program);
     const auto library = std::filesystem::temp_directory_path() / "leonida_mesh_test";
     std::filesystem::create_directories(library);
-    std::filesystem::copy_file(std::filesystem::u8path(LEONIDA_TEST_MS_SPV), library / "ms_draw.spv",
+    std::filesystem::copy_file(std::filesystem::path(u8"" LEONIDA_TEST_MS_SPV), library / "ms_draw.spv",
                                std::filesystem::copy_options::overwrite_existing);
-    std::filesystem::copy_file(std::filesystem::u8path(LEONIDA_TEST_PS_SPV), library / "ps_draw.spv",
+    std::filesystem::copy_file(std::filesystem::path(u8"" LEONIDA_TEST_PS_SPV), library / "ps_draw.spv",
                                std::filesystem::copy_options::overwrite_existing);
-    std::filesystem::copy_file(std::filesystem::u8path(LEONIDA_TEST_VS_FULLSCREEN_SPV), library / "vs_fullscreen.spv",
+    std::filesystem::copy_file(std::filesystem::path(u8"" LEONIDA_TEST_VS_FULLSCREEN_SPV), library / "vs_fullscreen.spv",
                                std::filesystem::copy_options::overwrite_existing);
     {
         std::ofstream index(library / "index.json", std::ios::binary);
